@@ -1,0 +1,299 @@
+import time
+import encoders
+
+from sensors import read_left, read_right, read_front
+from motors import stop, drive_forward_counts, turn_left_90, turn_right_90
+
+
+# ---- Now I need to define the maze size ----
+
+MAZE_SIZE = 12 #this defines the maze matrix as a 12 x 12 size
+
+# ---- Now define what values are each cardinal direction ----
+DIR_NORTH = 0
+DIR_EAST = 1
+DIR_SOUTH = 2
+DIR_WEST = 3
+
+# ---- Robot position in maze ------
+
+mouse_x = 0 #start cell x
+mouse_y = 0 #start cell y
+heading = DIR_NORTH #start facing north
+
+# --- define number of steps to the goal ----
+
+distance_grid = [[255 for _ in range(MAZE_SIZE)] for _ in range(MAZE_SIZE)]
+
+# --- Wall map for bits N,E,S,W
+
+wall_grid = [[0 for _ in range(MAZE_SIZE)] for _ in range(MAZE_SIZE)]
+
+#------------------------ PARAMETERS FOR MOVEMENT
+
+WALL_DETECTION_MM = 75
+COUNTS_PER_CELL = 180
+MOVE_SPEED = 22
+
+def at_goal():
+    return is_goal_cell(mouse_x, mouse_y)
+
+##def is_goal_cell(x, y):
+   ## """Return True if (x, y) is inside the centre 2x2 goal area."""
+   ## return (x in (5, 6)) and (y in (5, 6))
+
+def setup_distances():
+    for x in range(MAZE_SIZE):
+        for y in range(MAZE_SIZE):
+            distance_grid[x][y] = 255
+            
+    #establish centre grid
+    distance_grid[5][5] = 0
+    distance_grid[5][6] = 0
+    distance_grid[6][5] = 0
+    distance_grid[6][6] = 0
+    
+
+def setup_outer_walls():
+    for i in range(MAZE_SIZE):
+        
+        #SET BOTTOM WALL AS SOUTH WALL
+        wall_grid[i][0] |= (1<< DIR_SOUTH)
+        #SET TOP ROW AS NORTH WALL
+        wall_grid[i][MAZE_SIZE - 1] |= (1 << DIR_NORTH)
+        #SET LEFT COLUMN AS WEST WALL
+        wall_grid[0][i] |= (1<<DIR_WEST)
+        #SET RIGHT COLUMN AS EAST WALL
+        wall_grid[MAZE_SIZE - 1][i] |= (1 << DIR_EAST)
+
+def add_wall(x, y, direction):
+    """Mark a wall in cell (x, y) and the opposite wall in the neighbouring cell."""
+    global wall_grid
+
+    # Mark wall in this cell
+    wall_grid[x][y] |= (1 << direction)
+
+    # Work out the neighbour cell depending on direction
+    nx, ny = x, y
+
+    if direction == DIR_WEST:
+        if x == 0:
+            return
+        nx = x - 1
+
+    elif direction == DIR_EAST:
+        if x == MAZE_SIZE - 1:
+            return
+        nx = x + 1
+
+    elif direction == DIR_NORTH:
+        if y == MAZE_SIZE - 1:
+            return
+        ny = y + 1
+
+    elif direction == DIR_SOUTH:
+        if y == 0:
+            return
+        ny = y - 1
+
+    # Opposite direction (N<->S, E<->W)
+    opposite = (direction + 2) & 0x3
+
+    # Mark opposite wall in neighbour cell
+    wall_grid[nx][ny] |= (1 << opposite)
+    
+def update_walls_from_measurement(d_left, d_front, d_right):
+    
+    global mouse_x,mouse_y,heading
+    
+    x = mouse_x
+    y = mouse_y
+    
+    #taking the relative direction and making it absolute
+    direction_front = heading
+    direction_left = (heading + 3) & 0x3
+    direction_right = (heading + 1) & 0x3
+    
+    #FRONT WALL
+    if 0 < d_front < WALL_DETECTION_MM:
+        add_wall(x, y, direction_front)
+    
+    
+    #LEFT WALL
+    if 0 < d_left < WALL_DETECTION_MM:
+        add_wall(x, y, direction_left)
+        
+        
+    #RIGHT WALL
+    if 0 < d_right < WALL_DETECTION_MM:
+        add_wall(x, y, direction_right)
+        
+    
+def recompute_floodfill_calculation():
+    
+    def is_goal_cell(x, y):
+        return (x in (5,6)) and (y in (5,6))
+    
+    changed = True
+    
+    while changed:
+        changed = False
+        
+        for x in range (MAZE_SIZE):
+            for y in range (MAZE_SIZE):
+                if is_goal_cell(x,y):
+                    continue
+                
+                best_neighbour = 255
+                
+                #Code for WEST neighbour
+                if not (wall_grid[x][y] & (1 << DIR_WEST)) and x > 0:
+                    best_neighbour = min(best_neighbour, distance_grid[x - 1][y])
+
+                # NORTH neighbour
+                if not (wall_grid[x][y] & (1 << DIR_NORTH)) and y < MAZE_SIZE - 1:
+                    best_neighbour = min(best_neighbour, distance_grid[x][y + 1])
+
+                # EAST neighbour
+                if not (wall_grid[x][y] & (1 << DIR_EAST)) and x < MAZE_SIZE - 1:
+                    best_neighbour = min(best_neighbour, distance_grid[x + 1][y])
+
+                # SOUTH neighbour
+                if not (wall_grid[x][y] & (1 << DIR_SOUTH)) and y > 0:
+                    best_neighbour = min(best_neighbour, distance_grid[x][y - 1])
+                    
+                new_value = best_neighbour + 1
+                
+                if new_value != distance_grid[x][y]:
+                    distance_grid[x][y] = new_value
+                    changed = True
+                    
+#NOW MAKE THE CODE CHOOSE THE NEXT CELL
+                
+def select_next_direction():
+    x,y = mouse_x,mouse_y
+    
+    best_direction = None
+    best_value = 255
+    
+    for direction in (DIR_NORTH, DIR_EAST, DIR_SOUTH, DIR_WEST):
+        if wall_grid[x][y] & (1 << direction):
+            continue
+        
+        nx, ny = x, y
+        if direction == DIR_WEST and x > 0:
+            nx -= 1
+        elif direction == DIR_EAST and x < MAZE_SIZE -1:
+            nx += 1
+        elif direction == DIR_NORTH and y < MAZE_SIZE - 1:
+            ny += 1
+        elif direction == DIR_SOUTH and y > 0:
+            ny -= 1
+        else:
+            continue
+        
+        if distance_grid[nx][ny] < best_value:
+            
+            best_value = distance_grid[nx][ny]
+            
+            best_direction=direction
+            
+    return best_direction
+        
+#MOVEMENT USING THE MOTOR FUNCTIONS
+    
+def turn_180():
+    turn_left_90()
+    turn_left_90()
+    
+def move_one_cell(target_direction):
+    global heading, mouse_x, mouse_y
+    
+    if target_direction is None:
+        stop()
+        return
+#how much to rotate
+    
+    diff = (target_direction - heading) & 0x3
+    
+    if diff == 0:
+        pass
+    elif diff == 1:
+        turn_right_90()
+    elif diff == 2:
+        turn_180()
+    elif diff == 3:
+        turn_left_90()
+        
+    heading = target_direction
+        
+    
+    #drive forward 1 cell
+    
+    drive_forward_counts(COUNTS_PER_CELL, speed = MOVE_SPEED)
+    
+    
+    #update position in the grid
+    #NORTH
+    if heading == DIR_NORTH:
+        mouse_y += 1
+    #SOUTH
+    elif heading == DIR_SOUTH:
+        mouse_y -= 1
+   #EAST     
+    elif heading == DIR_EAST:
+        mouse_x += 1
+    #WEST 
+    elif heading == DIR_WEST:
+        mouse_x -= 1
+
+def main():
+    global mouse_x,mouse_y,heading
+    
+    print("\n=== Flood-Fill Micromouse ===\n")
+    
+    #initialize world model
+    setup_outer_walls()
+    setup_distances()
+
+    # 2. Encoder setup
+    if hasattr(encoders, "setup"):
+        encoders.setup()
+    encoders.reset()
+
+    # 3. Main exploration loop
+    while not at_goal():
+        # (a) read sensors
+        d_left  = read_left()
+        d_right = read_right()
+        d_front = read_front()
+
+        # (b) update wall map for current cell
+        update_walls_from_measurement(d_left, d_front, d_right)
+
+        # (c) recompute distance grid
+        recompute_floodfill_calculation()
+
+        # (d) pick next heading
+        next_dir = select_next_direction()
+
+        # (e) turn and move to next cell
+        move_one_cell(next_dir)
+
+        # small delay to keep serial output readable
+        time.sleep(0.05)
+
+    # when we break out of the loop, we are at the goal
+    stop()
+    print("Reached goal at cell:", mouse_x, mouse_y)
+
+    
+        
+if __name__ == "__main__":
+    main()
+    
+
+
+
+
+
