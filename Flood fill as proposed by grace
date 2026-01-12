@@ -1,0 +1,178 @@
+import time
+from motors import motors_set, stop
+from sensors import read_left, read_right, read_front
+import encoders
+from turns import turn_left, turn_right
+
+#set maze size
+ROWS, COLS = 12, 12
+#all cells set 0, unknown
+maze = [[0 for _ in range(COLS)] for _ in range(ROWS)]
+
+#directions
+directions = [(-1, 0), (0, 1), (1, 0), (0, -1)]
+mouse_dir = 0
+#start position
+mouse_x, mouse_y = 1, 1  
+
+GOAL_CELLS = [(6,6), (7,6), (6,7), (7,7)]
+
+CELL_COUNTS = 160  
+
+
+def is_valid(x, y):
+    return 0 <= x < ROWS and 0 <= y < COLS
+
+#check sensors and update with walls 
+def update_walls_real(x, y):
+    global mouse_dir
+
+    if read_front() < 80:
+        nx, ny = x + directions[mouse_dir][0], y + directions[mouse_dir][1]
+        if is_valid(nx, ny):
+            maze[nx][ny] = 1
+
+    left_dir = (mouse_dir - 1) % 4
+    nx, ny = x + directions[left_dir][0], y + directions[left_dir][1]
+    if read_left() < 80 and is_valid(nx, ny):
+        maze[nx][ny] = 1
+
+    right_dir = (mouse_dir + 1) % 4
+    nx, ny = x + directions[right_dir][0], y + directions[right_dir][1]
+    if read_right() < 80 and is_valid(nx, ny):
+        maze[nx][ny] = 1
+
+def flood_fill():
+    distances = [[-1 for _ in range(COLS)] for _ in range(ROWS)]
+    
+    queue = []
+    
+# centre distance 0
+    for gx, gy in GOAL_CELLS:
+        distances[gx][gy] = 0
+        queue.append((gx, gy))
+#process meighbouring cells
+    index = 0
+    while index < len(queue):
+        x, y = queue[index]
+        index += 1
+        for dx, dy in directions:
+            #update if no wall or not visited
+            nx, ny = x + dx, y + dy
+            if is_valid(nx, ny) and maze[nx][ny] != 1 and distances[nx][ny] == -1:
+                #assaign distance, current cell +1
+                distances[nx][ny] = distances[x][y] + 1
+                queue.append((nx, ny))
+    return distances
+
+def turn_to_dir(target_dir):
+    global mouse_dir
+    #determine turn direction
+    diff = (target_dir - mouse_dir) % 4
+    if diff == 0:
+        pass
+    #90
+    elif diff == 1:
+        turn_right()
+        #180 (right twice)
+    elif diff == 2:
+        turn_right()
+        time.sleep(0.1)
+        turn_right()
+        #90
+    elif diff == 3:
+        turn_left()
+    mouse_dir = target_dir
+
+def drive_forward_counts(target_counts):
+    #set encoder 0
+    encoders.reset()
+    #forward
+    motors_set(20, 20)
+    while True:
+        l_count, r_count = encoders.get_counts()
+        avg = (abs(l_count) + abs(r_count)) // 2
+        if avg >= target_counts:
+            break
+        time.sleep(0.01)
+    stop()
+    time.sleep(0.05)
+#forward one cell
+def move_to(next_x, next_y):
+    global mouse_x, mouse_y
+    dx = next_x - mouse_x
+    dy = next_y - mouse_y
+    for d, (ddx, ddy) in enumerate(directions):
+        if dx == ddx and dy == ddy:
+            turn_to_dir(d)
+            break
+    drive_forward_counts(CELL_COUNTS)
+    mouse_x, mouse_y = next_x, next_y
+
+def solve_maze_real():
+    global mouse_x, mouse_y
+    #move until goal cells
+    while (mouse_x, mouse_y) not in GOAL_CELLS:
+        update_walls_real(mouse_x, mouse_y)
+        #stored shortest steps
+        distances = flood_fill()
+        #check neighbours for shortest distance
+        min_dist = float('inf')
+        next_cell = None
+        for dx, dy in directions:
+            nx, ny = mouse_x + dx, mouse_y + dy
+            if is_valid(nx, ny) and maze[nx][ny] != 1 and distances[nx][ny] != -1:
+                if distances[nx][ny] < min_dist:
+                    min_dist = distances[nx][ny]
+                    next_cell = (nx, ny)
+        #stop if no valid move            
+        if next_cell is None:
+            stop()
+            return
+        move_to(*next_cell)
+        time.sleep(0.05)
+    stop()
+
+def get_run_path():
+    path = []
+    distances = flood_fill()
+    x, y = mouse_x, mouse_y
+    #add to path until goal
+    while (x, y) not in GOAL_CELLS:
+        path.append((x, y))
+        #neighbour with smaller distance
+        min_dist = distances[x][y]
+        found = False
+        for dx, dy in directions:
+            nx, ny = x + dx, y + dy
+            if is_valid(nx, ny) and maze[nx][ny] != 1 and distances[nx][ny] != -1:
+                if distances[nx][ny] < min_dist:
+                    min_dist = distances[nx][ny]
+                    next_x, next_y = nx, ny
+                    found = True
+        #continue is valid cell found            
+        if found:
+            x, y = next_x, next_y
+        else:
+            break
+    
+    path.append((x, y))
+    return path
+
+def fastRun():
+    global mouse_x, mouse_y, mouse_dir
+    #reset to start
+    mouse_x, mouse_y = 1, 1
+    mouse_dir = 0
+    #follow shortest
+    path = get_run_path()
+    for idx in range(1, len(path)):
+        next_x, next_y = path[idx]
+        move_to(next_x, next_y)
+        time.sleep(0.01)
+    stop()
+
+if __name__ == "__main__":
+    solve_maze_real()
+    fastRun()
+
